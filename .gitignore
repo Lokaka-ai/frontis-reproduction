@@ -1,0 +1,65 @@
+# Python caches and build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments and local environment files
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# Secrets and credentials
+*.pem
+*.key
+credentials.json
+secrets.json
+
+# Notebooks
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# Editors and IDEs
+.idea/
+.vscode/
+*.code-workspace
+*.swp
+*~
+
+# Datasets and local data
+data/
+datasets/
+
+# Model checkpoints and large ML artifacts
+checkpoints/
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.onnx
+
+# Generated logs, tracking state, and experiment outputs
+*.log
+logs/
+outputs/
+runs/
+artifacts/
+wandb/
+mlruns/
+lightning_logs/
+
+# Local tool caches
+.cache/
