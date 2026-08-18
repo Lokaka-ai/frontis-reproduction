@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "tolerance": 1e-12,
+  "runs": [
+    {
+      "seed": 20260816,
+      "cards": 8,
+      "failed_cards": 1,
+      "raw_multi_candidate_draws": 5,
+      "unique_legal_states": 3,
+      "journal_nodes": 9,
+      "traced_llm_calls": 16,
+      "traced_llm_operators": 5
+    },
+    {
+      "seed": 20260817,
+      "cards": 8,
+      "failed_cards": 3,
+      "raw_multi_candidate_draws": 4,
+      "unique_legal_states": 2,
+      "journal_nodes": 9,
+      "traced_llm_calls": 16,
+      "traced_llm_operators": 4
+    },
+    {
+      "seed": 20260818,
+      "cards": 8,
+      "failed_cards": 0,
+      "raw_multi_candidate_draws": 6,
+      "unique_legal_states": 3,
+      "journal_nodes": 9,
+      "traced_llm_calls": 16,
+      "traced_llm_operators": 4
+    }
+  ],
+  "unique_legal_states": 8,
+  "trajectories_with_eligible_states": 3,
+  "score_component_discriminative_states": 8,
+  "score_component_discriminative_fraction": 1.0,
+  "delta_component_discriminative_states": 5,
+  "delta_component_discriminative_fraction": 0.625,
+  "novelty_component_discriminative_states": 0,
+  "novelty_component_discriminative_fraction": 0.0,
+  "improve_states": 6,
+  "improve_states_full_equals_score_only": 3,
+  "improve_states_full_differs_from_score_only": 3,
+  "max_tv_full_vs_score_only_on_improve": 0.09958408640270763,
+  "mean_tv_full_vs_score_only_on_improve": 0.0417691888699236,
+  "improve_states_argmax_set_changed": 0,
+  "single_family_states": 8,
+  "observed_method_families": [
+    "sklearn"
+  ]
+}

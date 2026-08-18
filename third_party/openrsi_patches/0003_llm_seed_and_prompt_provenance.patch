@@ -1,0 +1,113 @@
+diff --git a/examples/mle_bench/single_task_runner.py b/examples/mle_bench/single_task_runner.py
+--- a/examples/mle_bench/single_task_runner.py
++++ b/examples/mle_bench/single_task_runner.py
+@@ -800,6 +800,7 @@ def build_operator_config(name: str, relative_path: str) -> OperatorConfig:
+         generation_kwargs = _merge_generation_kwargs(
+             generation_kwargs,
+             dict(solver_operator_overrides.get("llm", {}).get("generation_kwargs", {})),
+         )
++        generation_kwargs.setdefault("seed", seed)
+ 
+         return OperatorConfig(
+             llm=GenericLLMConfig(
+diff --git a/src/dojo/core/solvers/llm_helpers/generic_llm.py b/src/dojo/core/solvers/llm_helpers/generic_llm.py
+--- a/src/dojo/core/solvers/llm_helpers/generic_llm.py
++++ b/src/dojo/core/solvers/llm_helpers/generic_llm.py
+@@ -53,7 +53,25 @@ class GenericLLM:
+     @property
+     def client_content_key(self):
+         return self.client.client_content_key
+ 
++    def set_generation_seed(self, seed: int) -> None:
++        """Set the explicit provider request seed for the next and later calls."""
++        self.generation_kwargs["seed"] = int(seed)
++
++    def _build_trace(
++        self,
++        *,
++        usage_stats: Dict[str, Any],
++        messages: List[Dict[str, str]],
++        output: Any,
++    ) -> Dict[str, Any]:
++        return {
++            "usage": usage_stats,
++            "prompt_messages": messages,
++            "completion_text": str(output),
++            "generation_kwargs": dict(self.generation_kwargs),
++        }
++
+     def _set_up_prompts(self) -> None:
+         """
+         Sets up the prompt templates by instantiating them using Hydra.
+@@ -123,7 +141,11 @@ class GenericLLM:
+                 function_description=function_description,
+             )
+             usage_stats["cumulative_num_llm_calls"] = self.call_tracker
+-            return output, {"usage": usage_stats, "prompt_messages": messages, "completion_text": str(output)}
++            return output, self._build_trace(
++                usage_stats=usage_stats,
++                messages=messages,
++                output=output,
++            )
+ 
+         # If messages are not provided, initialize them with a system message using the query_data
+         if messages is None:
+@@ -144,7 +166,11 @@ class GenericLLM:
+             )
+             usage_stats["cumulative_num_llm_calls"] = self.call_tracker
+ 
+-            return output, {"usage": usage_stats, "prompt_messages": messages, "completion_text": str(output)}
++            return output, self._build_trace(
++                usage_stats=usage_stats,
++                messages=messages,
++                output=output,
++            )
+ 
+         # Append a user message based on whether it's the first message or a subsequent one
+         if len(messages) == 1:
+@@ -171,4 +197,8 @@ class GenericLLM:
+         usage_stats["cumulative_num_llm_calls"] = self.call_tracker
+ 
+         log.warning("got response from llm")
+-        return output, {"usage": usage_stats, "prompt_messages": messages, "completion_text": str(output)}
++        return output, self._build_trace(
++            usage_stats=usage_stats,
++            messages=messages,
++            output=output,
++        )
+diff --git a/tests/test_evo_population_checkpoint.py b/tests/test_evo_population_checkpoint.py
+--- a/tests/test_evo_population_checkpoint.py
++++ b/tests/test_evo_population_checkpoint.py
+@@ -1,7 +1,8 @@
+ import random
+ 
+ import numpy
+ 
++from dojo.core.solvers.llm_helpers.generic_llm import GenericLLM
+ from dojo.core.solvers.utils.journal import Node
+ from dojo.core.solvers.utils.metric import MetricValue
+ from dojo.solvers.evo.evo import (
+@@ -159,3 +160,20 @@ def test_cloned_population_reproduces_candidate_vector_and_action_draw():
+     assert [node.id for node in actual_nodes] == [node.id for node in expected_nodes]
+     assert (actual_island, actual_operator) == (expected_island, expected_operator)
+     assert clone.last_parent_selection == expected_trace
++
++
++def test_llm_trace_records_exact_prompt_and_request_seed():
++    llm = GenericLLM.__new__(GenericLLM)
++    llm.generation_kwargs = {"temperature": 0.6}
++    llm.set_generation_seed(20260816)
++    messages = [
++        {"role": "system", "content": "system prompt"},
++        {"role": "user", "content": "user prompt"},
++    ]
++
++    trace = llm._build_trace(
++        usage_stats={"prompt_tokens": 4},
++        messages=messages,
++        output="completion",
++    )
++
++    assert trace["prompt_messages"] == messages
++    assert trace["completion_text"] == "completion"
++    assert trace["generation_kwargs"]["seed"] == 20260816
