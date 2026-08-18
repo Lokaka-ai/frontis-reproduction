@@ -1,0 +1,104 @@
+diff --git a/src/dojo/solvers/evo/evo.py b/src/dojo/solvers/evo/evo.py
+--- a/src/dojo/solvers/evo/evo.py
++++ b/src/dojo/solvers/evo/evo.py
+@@ -345,11 +345,23 @@ class SolutionsDatabase:
+             raise ValueError("Unsupported population-state schema")
+         if int(payload.get("num_islands", -1)) != self.num_islands:
+             raise ValueError("Population-state island count does not match config")
++        if int(payload.get("max_size", -1)) != self.max_size:
++            raise ValueError("Population-state maximum island size does not match config")
+         if bool(payload.get("lower_is_better")) != self.lower_is_better:
+             raise ValueError("Population-state metric direction does not match config")
+         islands = list(payload.get("islands") or [])
+         if len(islands) != self.num_islands:
+             raise ValueError("Population-state island payload is incomplete")
++        island_ids = [int(island_payload["island_id"]) for island_payload in islands]
++        if sorted(island_ids) != list(range(self.num_islands)):
++            raise ValueError("Population-state island identifiers are invalid")
++        all_node_ids = [
++            str(node_id)
++            for island_payload in islands
++            for node_id in island_payload.get("node_ids") or []
++        ]
++        if len(all_node_ids) != len(set(all_node_ids)):
++            raise ValueError("Population state contains duplicate island membership")
+         for island_payload in islands:
+             island_id = int(island_payload["island_id"])
+             node_ids = [str(node_id) for node_id in island_payload.get("node_ids") or []]
+@@ -942,7 +954,9 @@ class Evolutionary(Solver):
+             raise ValueError("Unsupported evolutionary checkpoint schema")
+         actual_ids = [str(node.id) for node in self.journal.nodes]
+         if list(payload.get("journal_node_ids") or []) != actual_ids:
+             raise ValueError("Population checkpoint does not match the loaded journal")
++        if dict(payload.get("solver_state") or {}) != self.state.state_dict():
++            raise ValueError("Population checkpoint does not match the loaded solver state")
+         nodes_by_id = {str(node.id): node for node in self.journal.nodes}
+         for node_id, card in dict(payload.get("experience_cards") or {}).items():
+             if node_id in nodes_by_id and isinstance(card, dict):
+diff --git a/tests/test_evo_population_checkpoint.py b/tests/test_evo_population_checkpoint.py
+--- a/tests/test_evo_population_checkpoint.py
++++ b/tests/test_evo_population_checkpoint.py
+@@ -99,3 +99,63 @@ def test_rng_state_round_trip_reproduces_python_and_numpy_draws():
+ 
+     assert [random.random() for _ in range(4)] == expected_python
+     numpy.testing.assert_array_equal(numpy.random.random(4), expected_numpy)
++
++
++def test_cloned_population_reproduces_candidate_vector_and_action_draw():
++    nodes = {
++        "a": make_node("a", 0.2),
++        "b": make_node("b", 0.3),
++        "c": make_node("c", 0.4),
++    }
++    experience = {
++        "enabled": True,
++        "parent_selection": {
++            "enabled": True,
++            "weights": {"score": 1.0, "delta": 0.4, "novelty": 0.25},
++        },
++    }
++    for node in nodes.values():
++        node.experience_card = {
++            "node_id": node.id,
++            "method_family_auto": "sklearn",
++            "fitness": node.metric.value,
++            "status": "success",
++            "status_code": 200,
++            "is_buggy": False,
++        }
++    source = SolutionsDatabase(
++        num_islands=1,
++        max_size=10,
++        lower_is_better=True,
++        logger=NullLogger(),
++        experience_config=experience,
++    )
++    source._islands[0].nodes = [nodes["b"], nodes["a"], nodes["c"]]
++    source.global_min_fitness = 0.2
++    source.global_max_fitness = 0.4
++
++    random.seed(2026)
++    numpy.random.seed(2027)
++    population_payload = source.state_dict()
++    rng_payload = capture_rng_state()
++    expected_nodes, expected_island, expected_operator = source.sample_in_context(
++        {"improve": 1, "crossover": 2}, 1.0, 0.5
++    )
++    expected_trace = source.last_parent_selection
++
++    clone = SolutionsDatabase(
++        num_islands=1,
++        max_size=10,
++        lower_is_better=True,
++        logger=NullLogger(),
++        experience_config=experience,
++    )
++    clone.load_state_dict(population_payload, nodes_by_id=nodes)
++    restore_rng_state(rng_payload)
++    actual_nodes, actual_island, actual_operator = clone.sample_in_context(
++        {"improve": 1, "crossover": 2}, 1.0, 0.5
++    )
++
++    assert [node.id for node in actual_nodes] == [node.id for node in expected_nodes]
++    assert (actual_island, actual_operator) == (expected_island, expected_operator)
++    assert clone.last_parent_selection == expected_trace

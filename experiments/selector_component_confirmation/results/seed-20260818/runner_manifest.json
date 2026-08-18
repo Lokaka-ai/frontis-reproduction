@@ -1,0 +1,19 @@
+{
+  "experiment_name": "openmle_evo_smoke",
+  "task_root": "/workspace/frontis-research/pilot/outputs/selector-component-confirmation/seed-20260818/.hydra/airaevo_tasks",
+  "task_names": [
+    "spooky-author-identification"
+  ],
+  "n_samples_per_task": 1,
+  "llm_concurrency": 2,
+  "sandbox_concurrency": 2,
+  "execution_mode": "generation",
+  "async_workers": 1,
+  "requested_async_workers": 1,
+  "resolved_async_workers": 1,
+  "strict_resume": false,
+  "skipped_completed_tasks": 0,
+  "launched_tasks": 1,
+  "task_concurrency_per_epoch": 2,
+  "max_concurrent_tasks": 2
+}

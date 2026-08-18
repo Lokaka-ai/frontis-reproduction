@@ -63,3 +63,7 @@ lightning_logs/
 
 # Local tool caches
 .cache/
+
+# Local research staging area (curated files are copied into the repository
+# structure before publication)
+pilot/

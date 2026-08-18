@@ -1,0 +1,350 @@
+diff --git a/src/dojo/utils/state.py b/src/dojo/utils/state.py
+index 4f95c78..692defa 100644
+--- a/src/dojo/utils/state.py
++++ b/src/dojo/utils/state.py
+@@ -70,11 +70,13 @@ class EvolutionaryState:
+     def state_dict(self):
+         return {
+             "current_step": self.current_step,
++            "current_generation": self.current_generation,
+             "running_time": self.running_time,
+             "num_starts": self.num_starts,
+         }
+ 
+     def load_state_dict(self, state_dict):
+         self.current_step = state_dict["current_step"]
++        self.current_generation = state_dict.get("current_generation", 0)
+         self.running_time = state_dict["running_time"]
+         self.num_starts = state_dict.get("num_starts", 0)
+diff --git a/src/dojo/solvers/evo/evo.py b/src/dojo/solvers/evo/evo.py
+index 84bcd61..2fcaa7d 100644
+--- a/src/dojo/solvers/evo/evo.py
++++ b/src/dojo/solvers/evo/evo.py
+@@ -67,5 +67,48 @@ from tts_search.airaevo_async_resources import (
+ )
+ 
+ 
++def _python_random_state_to_json(value: Any) -> Any:
++    if isinstance(value, tuple):
++        return [_python_random_state_to_json(item) for item in value]
++    return value
++
++
++def _python_random_state_from_json(value: Any) -> Any:
++    if isinstance(value, list):
++        return tuple(_python_random_state_from_json(item) for item in value)
++    return value
++
++
++def capture_rng_state() -> dict[str, Any]:
++    numpy_state = numpy.random.get_state()
++    return {
++        "python_random": _python_random_state_to_json(random.getstate()),
++        "numpy_random": {
++            "bit_generator": str(numpy_state[0]),
++            "keys": numpy_state[1].tolist(),
++            "position": int(numpy_state[2]),
++            "has_gauss": int(numpy_state[3]),
++            "cached_gaussian": float(numpy_state[4]),
++        },
++    }
++
++
++def restore_rng_state(payload: dict[str, Any]) -> None:
++    python_state = payload.get("python_random")
++    numpy_payload = payload.get("numpy_random")
++    if python_state is None or not isinstance(numpy_payload, dict):
++        raise ValueError("Incomplete RNG state payload")
++    random.setstate(_python_random_state_from_json(python_state))
++    numpy.random.set_state(
++        (
++            str(numpy_payload["bit_generator"]),
++            numpy.asarray(numpy_payload["keys"], dtype=numpy.uint32),
++            int(numpy_payload["position"]),
++            int(numpy_payload["has_gauss"]),
++            float(numpy_payload["cached_gaussian"]),
++        )
++    )
++
++
+ @dataclass(frozen=True)
+ class AsyncWorkItem:
+@@ -274,6 +315,56 @@ class SolutionsDatabase:
+     def has_island_with_size(self, size: int) -> bool:
+         return any(island.size >= size for island in self._islands)
+ 
++    def state_dict(self) -> dict[str, Any]:
++        return {
++            "schema_version": 1,
++            "num_islands": int(self.num_islands),
++            "max_size": int(self.max_size),
++            "lower_is_better": bool(self.lower_is_better),
++            "global_min_fitness": float(self.global_min_fitness),
++            "global_max_fitness": float(self.global_max_fitness),
++            "forced_fresh_draft_reason": getattr(
++                self, "_forced_fresh_draft_reason", None
++            ),
++            "islands": [
++                {
++                    "island_id": int(island.island_id),
++                    "node_ids": [str(node.id) for node in island.nodes],
++                }
++                for island in self._islands
++            ],
++        }
++
++    def load_state_dict(
++        self,
++        payload: dict[str, Any],
++        *,
++        nodes_by_id: dict[str, Node],
++    ) -> None:
++        if int(payload.get("schema_version", 0)) != 1:
++            raise ValueError("Unsupported population-state schema")
++        if int(payload.get("num_islands", -1)) != self.num_islands:
++            raise ValueError("Population-state island count does not match config")
++        if bool(payload.get("lower_is_better")) != self.lower_is_better:
++            raise ValueError("Population-state metric direction does not match config")
++        islands = list(payload.get("islands") or [])
++        if len(islands) != self.num_islands:
++            raise ValueError("Population-state island payload is incomplete")
++        for island_payload in islands:
++            island_id = int(island_payload["island_id"])
++            node_ids = [str(node_id) for node_id in island_payload.get("node_ids") or []]
++            missing = [node_id for node_id in node_ids if node_id not in nodes_by_id]
++            if missing:
++                raise ValueError(f"Population state references unknown nodes: {missing}")
++            self._islands[island_id].nodes = [nodes_by_id[node_id] for node_id in node_ids]
++        self.global_min_fitness = float(payload["global_min_fitness"])
++        self.global_max_fitness = float(payload["global_max_fitness"])
++        reason = payload.get("forced_fresh_draft_reason")
++        if reason is None:
++            self.__dict__.pop("_forced_fresh_draft_reason", None)
++        else:
++            self._forced_fresh_draft_reason = str(reason)
++
+     def seed_islands_with_nodes(
+         self,
+         solution_nodes: List[Node],
+@@ -776,6 +866,7 @@ class Evolutionary(Solver):
+         self.state = EvolutionaryState()
+         self._rich_summary_locks: dict[str, threading.Lock] = {}
+         self._rich_summary_locks_guard = threading.Lock()
++        self._pending_population_checkpoint: dict[str, Any] | None = None
+ 
+     def save_checkpoint(self):
+         super().save_checkpoint()
+@@ -787,5 +878,70 @@ class Evolutionary(Solver):
+                 f.write(json.dumps(node) + "\n")
+         self.logger.info(f"Checkpoint saved to {journal_path}")
+ 
++        solution_database = getattr(self, "solution_database", None)
++        if solution_database is not None:
++            payload = self._population_checkpoint_payload(solution_database)
++            population_path = Path(self.cfg.checkpoint_path) / "population_state.json"
++            population_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
++
++            snapshot_name = (
++                f"generation_{int(self.state.current_generation):04d}_"
++                f"step_{int(self.state.current_step):06d}"
++            )
++            snapshot_dir = Path(self.cfg.checkpoint_path) / "decision_states" / snapshot_name
++            snapshot_dir.mkdir(parents=True, exist_ok=True)
++            (snapshot_dir / "population_state.json").write_text(
++                json.dumps(payload, indent=2), encoding="utf-8"
++            )
++            with (snapshot_dir / "journal.jsonl").open("w", encoding="utf-8") as handle:
++                for node in journal_sd:
++                    handle.write(json.dumps(node) + "\n")
++            self.logger.info(f"Population decision state saved to {snapshot_dir}")
++
++    def _population_checkpoint_payload(
++        self,
++        solution_database: SolutionsDatabase,
++    ) -> dict[str, Any]:
++        experience_cards = {}
++        rich_summaries = {}
++        for node in self.journal.nodes:
++            card = getattr(node, "experience_card", None)
++            if isinstance(card, dict):
++                experience_cards[str(node.id)] = card
++            summary = getattr(node, "rich_summary", None)
++            if isinstance(summary, dict):
++                rich_summaries[str(node.id)] = summary
++        return {
++            "schema_version": 1,
++            "journal_node_ids": [str(node.id) for node in self.journal.nodes],
++            "solver_state": self.state.state_dict(),
++            "population": solution_database.state_dict(),
++            "rng_state": capture_rng_state(),
++            "experience_cards": experience_cards,
++            "rich_summaries": rich_summaries,
++        }
++
++    def _load_population_checkpoint(
++        self,
++        solution_database: SolutionsDatabase,
++        payload: dict[str, Any],
++    ) -> None:
++        if int(payload.get("schema_version", 0)) != 1:
++            raise ValueError("Unsupported evolutionary checkpoint schema")
++        actual_ids = [str(node.id) for node in self.journal.nodes]
++        if list(payload.get("journal_node_ids") or []) != actual_ids:
++            raise ValueError("Population checkpoint does not match the loaded journal")
++        nodes_by_id = {str(node.id): node for node in self.journal.nodes}
++        for node_id, card in dict(payload.get("experience_cards") or {}).items():
++            if node_id in nodes_by_id and isinstance(card, dict):
++                nodes_by_id[node_id].experience_card = card
++        for node_id, summary in dict(payload.get("rich_summaries") or {}).items():
++            if node_id in nodes_by_id and isinstance(summary, dict):
++                nodes_by_id[node_id].rich_summary = summary
++        solution_database.load_state_dict(
++            dict(payload["population"]), nodes_by_id=nodes_by_id
++        )
++        restore_rng_state(dict(payload["rng_state"]))
++
+     def load_checkpoint(self):
+         super().load_checkpoint()
+@@ -803,5 +955,13 @@ class Evolutionary(Solver):
+             journal_export = [json.loads(line) for line in f]
+         self.journal = Journal.from_export_data({"nodes": journal_export})
+ 
++        population_path = Path(self.cfg.checkpoint_path) / "population_state.json"
++        if population_path.exists():
++            self._pending_population_checkpoint = json.loads(
++                population_path.read_text(encoding="utf-8")
++            )
++        else:
++            self._pending_population_checkpoint = None
++
+     def setup_operators(self):
+         """Setup operator LLMs."""
+@@ -1332,7 +1491,21 @@ class Evolutionary(Solver):
+ 
+     def _restore_solution_database_from_journal(self) -> SolutionsDatabase:
+         """Create the islands database and restore all resumable journal nodes."""
+         solution_database = self._new_solution_database()
+         self.solution_database = solution_database
++        if self._pending_population_checkpoint is not None:
++            self._load_population_checkpoint(
++                solution_database,
++                self._pending_population_checkpoint,
++            )
++            self.logger.info(
++                "Restored exact island membership and RNG state from checkpoint",
++                LogEvent.SOLVER,
++            )
++            return solution_database
++        self.logger.warning(
++            "No exact population checkpoint found; reconstructing from the journal is not population-faithful",
++            LogEvent.SOLVER,
++        )
+         self._seed_solution_database_from_journal(solution_database)
+         return solution_database
+diff --git a/tests/test_evo_population_checkpoint.py b/tests/test_evo_population_checkpoint.py
+new file mode 100644
+index 0000000..1fd3064
+--- /dev/null
++++ b/tests/test_evo_population_checkpoint.py
+@@ -0,0 +1,101 @@
++import random
++
++import numpy
++
++from dojo.core.solvers.utils.journal import Node
++from dojo.core.solvers.utils.metric import MetricValue
++from dojo.solvers.evo.evo import (
++    SolutionsDatabase,
++    capture_rng_state,
++    restore_rng_state,
++)
++from dojo.utils.state import EvolutionaryState
++
++
++class NullLogger:
++    def info(self, *args, **kwargs):
++        pass
++
++    def warning(self, *args, **kwargs):
++        pass
++
++    def error(self, *args, **kwargs):
++        pass
++
++    def debug(self, *args, **kwargs):
++        pass
++
++
++def make_node(node_id: str, value: float) -> Node:
++    return Node(
++        code=f"# {node_id}",
++        id=node_id,
++        metric=MetricValue(value, maximize=False),
++        is_buggy=False,
++    )
++
++
++def test_evolutionary_state_persists_generation():
++    state = EvolutionaryState()
++    state.current_step = 7
++    state.current_generation = 3
++    state.running_time = 12.5
++    payload = state.state_dict()
++
++    restored = EvolutionaryState()
++    restored.load_state_dict(payload)
++
++    assert restored.current_step == 7
++    assert restored.current_generation == 3
++    assert restored.running_time == 12.5
++
++
++def test_population_state_round_trip_preserves_exact_membership_and_order():
++    nodes = {
++        "a": make_node("a", 0.2),
++        "b": make_node("b", 0.3),
++        "c": make_node("c", 0.4),
++    }
++    source = SolutionsDatabase(
++        num_islands=2,
++        max_size=10,
++        lower_is_better=True,
++        logger=NullLogger(),
++    )
++    source._islands[0].nodes = [nodes["b"], nodes["a"]]
++    source._islands[1].nodes = [nodes["c"]]
++    source.global_min_fitness = 0.2
++    source.global_max_fitness = 0.4
++    source.request_fresh_draft("test_reason")
++
++    payload = source.state_dict()
++    restored = SolutionsDatabase(
++        num_islands=2,
++        max_size=10,
++        lower_is_better=True,
++        logger=NullLogger(),
++    )
++    restored.load_state_dict(payload, nodes_by_id=nodes)
++
++    assert [[node.id for node in island.nodes] for island in restored._islands] == [
++        ["b", "a"],
++        ["c"],
++    ]
++    assert restored.global_min_fitness == 0.2
++    assert restored.global_max_fitness == 0.4
++    assert restored._forced_fresh_draft_reason == "test_reason"
++
++
++def test_rng_state_round_trip_reproduces_python_and_numpy_draws():
++    random.seed(12345)
++    numpy.random.seed(54321)
++    payload = capture_rng_state()
++    expected_python = [random.random() for _ in range(4)]
++    expected_numpy = numpy.random.random(4)
++
++    random.seed(1)
++    numpy.random.seed(1)
++    restore_rng_state(payload)
++
++    assert [random.random() for _ in range(4)] == expected_python
++    numpy.testing.assert_array_equal(numpy.random.random(4), expected_numpy)

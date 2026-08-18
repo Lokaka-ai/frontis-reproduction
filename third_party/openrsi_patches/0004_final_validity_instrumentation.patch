@@ -1,0 +1,709 @@
+diff --git a/OpenMLE-Evo/third_party/aira-evo/examples/mle_bench/single_task_runner.py b/OpenMLE-Evo/third_party/aira-evo/examples/mle_bench/single_task_runner.py
+index bdc71e6..32e60ad 100644
+--- a/OpenMLE-Evo/third_party/aira-evo/examples/mle_bench/single_task_runner.py
++++ b/OpenMLE-Evo/third_party/aira-evo/examples/mle_bench/single_task_runner.py
+@@ -255,15 +255,14 @@ def _should_run_final_submit(
+ ) -> bool:
+     if int(submit_repeats) <= 0:
+         return False
+-    if str(benchmark).strip().lower() != "naturebench":
+-        return True
+-
+     configured = _nested_cfg_get(
+         runner_cfg,
+         ("solver", "final_submit"),
+-        task_cfg.get("final_submit", False),
++        task_cfg.get("final_submit"),
+     )
+-    return _coerce_bool(configured, default=False)
++    if configured is not None:
++        return _coerce_bool(configured, default=True)
++    return str(benchmark).strip().lower() != "naturebench"
+ 
+ 
+ def _effective_submit_score(
+@@ -801,6 +800,7 @@ def main() -> None:
+             generation_kwargs,
+             dict(solver_operator_overrides.get("llm", {}).get("generation_kwargs", {})),
+         )
++        generation_kwargs.setdefault("seed", seed)
+ 
+         return OperatorConfig(
+             llm=GenericLLMConfig(
+diff --git a/OpenMLE-Evo/third_party/aira-evo/src/dojo/core/solvers/llm_helpers/generic_llm.py b/OpenMLE-Evo/third_party/aira-evo/src/dojo/core/solvers/llm_helpers/generic_llm.py
+index fa07ec4..8349eee 100644
+--- a/OpenMLE-Evo/third_party/aira-evo/src/dojo/core/solvers/llm_helpers/generic_llm.py
++++ b/OpenMLE-Evo/third_party/aira-evo/src/dojo/core/solvers/llm_helpers/generic_llm.py
+@@ -54,6 +54,46 @@ class GenericLLM:
+     def client_content_key(self):
+         return self.client.client_content_key
+ 
++    def set_generation_seed(self, seed: int) -> None:
++        """Set the base request seed and restart its deterministic call schedule."""
++        self.generation_kwargs["seed"] = int(seed)
++        self.call_tracker = 0
++
++    def generation_state_dict(self) -> Dict[str, Any]:
++        return {
++            "call_tracker": int(self.call_tracker),
++            "base_seed": self.generation_kwargs.get("seed"),
++        }
++
++    def load_generation_state_dict(self, payload: Dict[str, Any]) -> None:
++        expected_seed = self.generation_kwargs.get("seed")
++        if payload.get("base_seed") != expected_seed:
++            raise ValueError("LLM generation-state seed does not match config")
++        self.call_tracker = int(payload["call_tracker"])
++
++    def _generation_kwargs_for_call(self) -> Dict[str, Any]:
++        request_kwargs = dict(self.generation_kwargs)
++        if request_kwargs.get("seed") is not None:
++            request_kwargs["seed"] = int(request_kwargs["seed"]) + max(
++                0, int(self.call_tracker) - 1
++            )
++        return request_kwargs
++
++    def _build_trace(
++        self,
++        *,
++        usage_stats: Dict[str, Any],
++        messages: List[Dict[str, str]],
++        output: Any,
++        generation_kwargs: Dict[str, Any],
++    ) -> Dict[str, Any]:
++        return {
++            "usage": usage_stats,
++            "prompt_messages": messages,
++            "completion_text": str(output),
++            "generation_kwargs": dict(generation_kwargs),
++        }
++
+     def _set_up_prompts(self) -> None:
+         """
+         Sets up the prompt templates by instantiating them using Hydra.
+@@ -69,6 +109,7 @@ class GenericLLM:
+         self,
+         messages: List[Dict[str, str]],
+         *,
++        generation_kwargs: Dict[str, Any],
+         json_schema: Optional[str] = None,
+         function_name: Optional[str] = None,
+         function_description: Optional[str] = None,
+@@ -79,7 +120,7 @@ class GenericLLM:
+                 json_schema=json_schema,
+                 function_name=function_name,
+                 function_description=function_description,
+-                **self.generation_kwargs,
++                **generation_kwargs,
+             )
+ 
+     def __call__(
+@@ -108,6 +149,7 @@ class GenericLLM:
+         """
+         log.warning("sending query to llm")
+         self.call_tracker += 1
++        generation_kwargs = self._generation_kwargs_for_call()
+ 
+         # Ensure that at least one of query_data or messages is provided
+         assert not (query_data is None and messages is None), (
+@@ -121,9 +163,15 @@ class GenericLLM:
+                 json_schema=json_schema,
+                 function_name=function_name,
+                 function_description=function_description,
++                generation_kwargs=generation_kwargs,
+             )
+             usage_stats["cumulative_num_llm_calls"] = self.call_tracker
+-            return output, {"usage": usage_stats, "prompt_messages": messages, "completion_text": str(output)}
++            return output, self._build_trace(
++                usage_stats=usage_stats,
++                messages=messages,
++                output=output,
++                generation_kwargs=generation_kwargs,
++            )
+ 
+         # If messages are not provided, initialize them with a system message using the query_data
+         if messages is None:
+@@ -141,10 +189,16 @@ class GenericLLM:
+                 json_schema=json_schema,
+                 function_name=function_name,
+                 function_description=function_description,
++                generation_kwargs=generation_kwargs,
+             )
+             usage_stats["cumulative_num_llm_calls"] = self.call_tracker
+ 
+-            return output, {"usage": usage_stats, "prompt_messages": messages, "completion_text": str(output)}
++            return output, self._build_trace(
++                usage_stats=usage_stats,
++                messages=messages,
++                output=output,
++                generation_kwargs=generation_kwargs,
++            )
+ 
+         # Append a user message based on whether it's the first message or a subsequent one
+         if len(messages) == 1:
+@@ -167,8 +221,14 @@ class GenericLLM:
+             json_schema=json_schema,
+             function_name=function_name,
+             function_description=function_description,
++            generation_kwargs=generation_kwargs,
+         )
+         usage_stats["cumulative_num_llm_calls"] = self.call_tracker
+ 
+         log.warning("got response from llm")
+-        return output, {"usage": usage_stats, "prompt_messages": messages, "completion_text": str(output)}
++        return output, self._build_trace(
++            usage_stats=usage_stats,
++            messages=messages,
++            output=output,
++            generation_kwargs=generation_kwargs,
++        )
+diff --git a/OpenMLE-Evo/third_party/aira-evo/src/dojo/solvers/evo/evo.py b/OpenMLE-Evo/third_party/aira-evo/src/dojo/solvers/evo/evo.py
+index f7ecb39..ede2767 100644
+--- a/OpenMLE-Evo/third_party/aira-evo/src/dojo/solvers/evo/evo.py
++++ b/OpenMLE-Evo/third_party/aira-evo/src/dojo/solvers/evo/evo.py
+@@ -78,6 +78,49 @@ from tts_search.airaevo_async_resources import (
+ )
+ 
+ 
++def _python_random_state_to_json(value: Any) -> Any:
++    if isinstance(value, tuple):
++        return [_python_random_state_to_json(item) for item in value]
++    return value
++
++
++def _python_random_state_from_json(value: Any) -> Any:
++    if isinstance(value, list):
++        return tuple(_python_random_state_from_json(item) for item in value)
++    return value
++
++
++def capture_rng_state() -> dict[str, Any]:
++    numpy_state = numpy.random.get_state()
++    return {
++        "python_random": _python_random_state_to_json(random.getstate()),
++        "numpy_random": {
++            "bit_generator": str(numpy_state[0]),
++            "keys": numpy_state[1].tolist(),
++            "position": int(numpy_state[2]),
++            "has_gauss": int(numpy_state[3]),
++            "cached_gaussian": float(numpy_state[4]),
++        },
++    }
++
++
++def restore_rng_state(payload: dict[str, Any]) -> None:
++    python_state = payload.get("python_random")
++    numpy_payload = payload.get("numpy_random")
++    if python_state is None or not isinstance(numpy_payload, dict):
++        raise ValueError("Incomplete RNG state payload")
++    random.setstate(_python_random_state_from_json(python_state))
++    numpy.random.set_state(
++        (
++            str(numpy_payload["bit_generator"]),
++            numpy.asarray(numpy_payload["keys"], dtype=numpy.uint32),
++            int(numpy_payload["position"]),
++            int(numpy_payload["has_gauss"]),
++            float(numpy_payload["cached_gaussian"]),
++        )
++    )
++
++
+ @dataclass(frozen=True)
+ class AsyncWorkItem:
+     attempt_id: int
+@@ -272,6 +315,68 @@ class SolutionsDatabase:
+     def has_island_with_size(self, size: int) -> bool:
+         return any(island.size >= size for island in self._islands)
+ 
++    def state_dict(self) -> dict[str, Any]:
++        return {
++            "schema_version": 1,
++            "num_islands": int(self.num_islands),
++            "max_size": int(self.max_size),
++            "lower_is_better": bool(self.lower_is_better),
++            "global_min_fitness": float(self.global_min_fitness),
++            "global_max_fitness": float(self.global_max_fitness),
++            "forced_fresh_draft_reason": getattr(
++                self, "_forced_fresh_draft_reason", None
++            ),
++            "islands": [
++                {
++                    "island_id": int(island.island_id),
++                    "node_ids": [str(node.id) for node in island.nodes],
++                }
++                for island in self._islands
++            ],
++        }
++
++    def load_state_dict(
++        self,
++        payload: dict[str, Any],
++        *,
++        nodes_by_id: dict[str, Node],
++    ) -> None:
++        if int(payload.get("schema_version", 0)) != 1:
++            raise ValueError("Unsupported population-state schema")
++        if int(payload.get("num_islands", -1)) != self.num_islands:
++            raise ValueError("Population-state island count does not match config")
++        if int(payload.get("max_size", -1)) != self.max_size:
++            raise ValueError("Population-state maximum island size does not match config")
++        if bool(payload.get("lower_is_better")) != self.lower_is_better:
++            raise ValueError("Population-state metric direction does not match config")
++        islands = list(payload.get("islands") or [])
++        if len(islands) != self.num_islands:
++            raise ValueError("Population-state island payload is incomplete")
++        island_ids = [int(island_payload["island_id"]) for island_payload in islands]
++        if sorted(island_ids) != list(range(self.num_islands)):
++            raise ValueError("Population-state island identifiers are invalid")
++        all_node_ids = [
++            str(node_id)
++            for island_payload in islands
++            for node_id in island_payload.get("node_ids") or []
++        ]
++        if len(all_node_ids) != len(set(all_node_ids)):
++            raise ValueError("Population state contains duplicate island membership")
++        for island_payload in islands:
++            island_id = int(island_payload["island_id"])
++            node_ids = [str(node_id) for node_id in island_payload.get("node_ids") or []]
++            missing = [node_id for node_id in node_ids if node_id not in nodes_by_id]
++            if missing:
++                raise ValueError(f"Population state references unknown nodes: {missing}")
++            self._islands[island_id].nodes = [nodes_by_id[node_id] for node_id in node_ids]
++        self.global_min_fitness = float(payload["global_min_fitness"])
++        self.global_max_fitness = float(payload["global_max_fitness"])
++        reason = payload.get("forced_fresh_draft_reason")
++        if reason is None:
++            self.__dict__.pop("_forced_fresh_draft_reason", None)
++        else:
++            self._forced_fresh_draft_reason = str(reason)
++
+     def seed_islands_with_nodes(
+         self,
+         solution_nodes: List[Node],
+@@ -780,6 +885,7 @@ class Evolutionary(Solver):
+         self.state = EvolutionaryState()
+         self._rich_summary_locks: dict[str, threading.Lock] = {}
+         self._rich_summary_locks_guard = threading.Lock()
++        self._pending_population_checkpoint: dict[str, Any] | None = None
+ 
+     def save_checkpoint(self):
+         super().save_checkpoint()
+@@ -792,6 +898,82 @@ class Evolutionary(Solver):
+                 f.write(json.dumps(node) + "\n")
+         self.logger.info(f"Checkpoint saved to {journal_path}")
+ 
++        solution_database = getattr(self, "solution_database", None)
++        if solution_database is not None:
++            payload = self._population_checkpoint_payload(solution_database)
++            population_path = Path(self.cfg.checkpoint_path) / "population_state.json"
++            population_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
++
++            snapshot_name = (
++                f"generation_{int(self.state.current_generation):04d}_"
++                f"step_{int(self.state.current_step):06d}"
++            )
++            snapshot_dir = Path(self.cfg.checkpoint_path) / "decision_states" / snapshot_name
++            snapshot_dir.mkdir(parents=True, exist_ok=True)
++            (snapshot_dir / "population_state.json").write_text(
++                json.dumps(payload, indent=2), encoding="utf-8"
++            )
++            with (snapshot_dir / "journal.jsonl").open("w", encoding="utf-8") as handle:
++                for node in journal_sd:
++                    handle.write(json.dumps(node) + "\n")
++            self.logger.info(f"Population decision state saved to {snapshot_dir}")
++
++    def _population_checkpoint_payload(
++        self,
++        solution_database: SolutionsDatabase,
++    ) -> dict[str, Any]:
++        experience_cards = {}
++        rich_summaries = {}
++        for node in self.journal.nodes:
++            card = getattr(node, "experience_card", None)
++            if isinstance(card, dict):
++                experience_cards[str(node.id)] = card
++            summary = getattr(node, "rich_summary", None)
++            if isinstance(summary, dict):
++                rich_summaries[str(node.id)] = summary
++        return {
++            "schema_version": 2,
++            "journal_node_ids": [str(node.id) for node in self.journal.nodes],
++            "solver_state": self.state.state_dict(),
++            "population": solution_database.state_dict(),
++            "rng_state": capture_rng_state(),
++            "llm_generation_state": {
++                name: llm.generation_state_dict()
++                for name, llm in self._operator_llms.items()
++            },
++            "experience_cards": experience_cards,
++            "rich_summaries": rich_summaries,
++        }
++
++    def _load_population_checkpoint(
++        self,
++        solution_database: SolutionsDatabase,
++        payload: dict[str, Any],
++    ) -> None:
++        if int(payload.get("schema_version", 0)) != 2:
++            raise ValueError("Unsupported evolutionary checkpoint schema")
++        actual_ids = [str(node.id) for node in self.journal.nodes]
++        if list(payload.get("journal_node_ids") or []) != actual_ids:
++            raise ValueError("Population checkpoint does not match the loaded journal")
++        if dict(payload.get("solver_state") or {}) != self.state.state_dict():
++            raise ValueError("Population checkpoint does not match the loaded solver state")
++        nodes_by_id = {str(node.id): node for node in self.journal.nodes}
++        for node_id, card in dict(payload.get("experience_cards") or {}).items():
++            if node_id in nodes_by_id and isinstance(card, dict):
++                nodes_by_id[node_id].experience_card = card
++        for node_id, summary in dict(payload.get("rich_summaries") or {}).items():
++            if node_id in nodes_by_id and isinstance(summary, dict):
++                nodes_by_id[node_id].rich_summary = summary
++        solution_database.load_state_dict(
++            dict(payload["population"]), nodes_by_id=nodes_by_id
++        )
++        restore_rng_state(dict(payload["rng_state"]))
++        llm_generation_state = dict(payload.get("llm_generation_state") or {})
++        if set(llm_generation_state) != set(self._operator_llms):
++            raise ValueError("LLM generation-state operators do not match config")
++        for name, llm in self._operator_llms.items():
++            llm.load_generation_state_dict(dict(llm_generation_state[name]))
++
+     def load_checkpoint(self):
+         super().load_checkpoint()
+ 
+@@ -808,6 +990,14 @@ class Evolutionary(Solver):
+             journal_export = [json.loads(line) for line in f]
+         self.journal = Journal.from_export_data({"nodes": journal_export})
+ 
++        population_path = Path(self.cfg.checkpoint_path) / "population_state.json"
++        if population_path.exists():
++            self._pending_population_checkpoint = json.loads(
++                population_path.read_text(encoding="utf-8")
++            )
++        else:
++            self._pending_population_checkpoint = None
++
+     def setup_operators(self):
+         """Setup operator LLMs."""
+ 
+@@ -823,6 +1013,15 @@ class Evolutionary(Solver):
+             and "rich_memory_summary" in self.cfg.operators
+             else None
+         )
++        self._operator_llms = {
++            "draft": draft_llm,
++            "improve": improve_llm,
++            "debug": debug_llm,
++            "crossover": crossover_llm,
++            "analyze": analyze_llm,
++        }
++        if rich_memory_summary_llm is not None:
++            self._operator_llms["rich_memory_summary"] = rich_memory_summary_llm
+ 
+         # Create the memory for operators
+         self.memory_op = create_memory_op(self.cfg.memory)
+@@ -1334,6 +1533,20 @@ class Evolutionary(Solver):
+         """Create the islands database and restore all resumable journal nodes."""
+         solution_database = self._new_solution_database()
+         self.solution_database = solution_database
++        if self._pending_population_checkpoint is not None:
++            self._load_population_checkpoint(
++                solution_database,
++                self._pending_population_checkpoint,
++            )
++            self.logger.info(
++                "Restored exact island membership and RNG state from checkpoint",
++                LogEvent.SOLVER,
++            )
++            return solution_database
++        self.logger.warning(
++            "No exact population checkpoint found; reconstructing from the journal is not population-faithful",
++            LogEvent.SOLVER,
++        )
+         self._seed_solution_database_from_journal(solution_database)
+         return solution_database
+ 
+diff --git a/OpenMLE-Evo/third_party/aira-evo/src/dojo/utils/state.py b/OpenMLE-Evo/third_party/aira-evo/src/dojo/utils/state.py
+index d4e135b..3a9dc3a 100644
+--- a/OpenMLE-Evo/third_party/aira-evo/src/dojo/utils/state.py
++++ b/OpenMLE-Evo/third_party/aira-evo/src/dojo/utils/state.py
+@@ -77,11 +77,13 @@ class EvolutionaryState:
+     def state_dict(self):
+         return {
+             "current_step": self.current_step,
++            "current_generation": self.current_generation,
+             "running_time": self.running_time,
+             "num_starts": self.num_starts,
+         }
+ 
+     def load_state_dict(self, state_dict):
+         self.current_step = state_dict["current_step"]
++        self.current_generation = state_dict.get("current_generation", 0)
+         self.running_time = state_dict["running_time"]
+         self.num_starts = state_dict.get("num_starts", 0)
+diff --git a/OpenMLE-Evo/third_party/aira-evo/tests/test_final_node_selection.py b/OpenMLE-Evo/third_party/aira-evo/tests/test_final_node_selection.py
+index 0df6357..d59ac27 100644
+--- a/OpenMLE-Evo/third_party/aira-evo/tests/test_final_node_selection.py
++++ b/OpenMLE-Evo/third_party/aira-evo/tests/test_final_node_selection.py
+@@ -128,3 +128,30 @@ def test_final_selection_falls_back_to_latest_non_root_when_journal_has_no_best_
+     )
+ 
+     assert selected is node
++
++
++def test_final_submit_can_be_disabled_for_mlebench():
++    assert not single_task_runner._should_run_final_submit(
++        benchmark="mlebench",
++        submit_repeats=1,
++        task_cfg={},
++        runner_cfg={"solver": {"final_submit": False}},
++    )
++
++
++def test_final_submit_keeps_mlebench_default_when_not_configured():
++    assert single_task_runner._should_run_final_submit(
++        benchmark="mlebench",
++        submit_repeats=1,
++        task_cfg={},
++        runner_cfg={},
++    )
++
++
++def test_zero_submit_repeats_takes_precedence_over_explicit_enable():
++    assert not single_task_runner._should_run_final_submit(
++        benchmark="mlebench",
++        submit_repeats=0,
++        task_cfg={},
++        runner_cfg={"solver": {"final_submit": True}},
++    )
+diff --git a/OpenMLE-Evo/third_party/aira-evo/tests/test_evo_population_checkpoint.py b/OpenMLE-Evo/third_party/aira-evo/tests/test_evo_population_checkpoint.py
+new file mode 100644
+index 0000000..3d4126a
+--- /dev/null
++++ b/OpenMLE-Evo/third_party/aira-evo/tests/test_evo_population_checkpoint.py
+@@ -0,0 +1,225 @@
++import random
++
++import numpy
++
++from dojo.core.solvers.llm_helpers.generic_llm import GenericLLM
++from dojo.core.solvers.utils.journal import Node
++from dojo.core.solvers.utils.metric import MetricValue
++from dojo.solvers.evo.evo import (
++    Evolutionary,
++    SolutionsDatabase,
++    capture_rng_state,
++    restore_rng_state,
++)
++from dojo.utils.state import EvolutionaryState
++
++
++class NullLogger:
++    def info(self, *args, **kwargs):
++        pass
++
++    def warning(self, *args, **kwargs):
++        pass
++
++    def error(self, *args, **kwargs):
++        pass
++
++    def debug(self, *args, **kwargs):
++        pass
++
++
++def make_node(node_id: str, value: float) -> Node:
++    return Node(
++        code=f"# {node_id}",
++        id=node_id,
++        metric=MetricValue(value, maximize=False),
++        is_buggy=False,
++    )
++
++
++def test_evolutionary_state_persists_generation():
++    state = EvolutionaryState()
++    state.current_step = 7
++    state.current_generation = 3
++    state.running_time = 12.5
++    payload = state.state_dict()
++
++    restored = EvolutionaryState()
++    restored.load_state_dict(payload)
++
++    assert restored.current_step == 7
++    assert restored.current_generation == 3
++    assert restored.running_time == 12.5
++
++
++def test_population_state_round_trip_preserves_exact_membership_and_order():
++    nodes = {
++        "a": make_node("a", 0.2),
++        "b": make_node("b", 0.3),
++        "c": make_node("c", 0.4),
++    }
++    source = SolutionsDatabase(
++        num_islands=2,
++        max_size=10,
++        lower_is_better=True,
++        logger=NullLogger(),
++    )
++    source._islands[0].nodes = [nodes["b"], nodes["a"]]
++    source._islands[1].nodes = [nodes["c"]]
++    source.global_min_fitness = 0.2
++    source.global_max_fitness = 0.4
++    source.request_fresh_draft("test_reason")
++
++    payload = source.state_dict()
++    restored = SolutionsDatabase(
++        num_islands=2,
++        max_size=10,
++        lower_is_better=True,
++        logger=NullLogger(),
++    )
++    restored.load_state_dict(payload, nodes_by_id=nodes)
++
++    assert [[node.id for node in island.nodes] for island in restored._islands] == [
++        ["b", "a"],
++        ["c"],
++    ]
++    assert restored.global_min_fitness == 0.2
++    assert restored.global_max_fitness == 0.4
++    assert restored._forced_fresh_draft_reason == "test_reason"
++
++
++def test_rng_state_round_trip_reproduces_python_and_numpy_draws():
++    random.seed(12345)
++    numpy.random.seed(54321)
++    payload = capture_rng_state()
++    expected_python = [random.random() for _ in range(4)]
++    expected_numpy = numpy.random.random(4)
++
++    random.seed(1)
++    numpy.random.seed(1)
++    restore_rng_state(payload)
++
++    assert [random.random() for _ in range(4)] == expected_python
++    numpy.testing.assert_array_equal(numpy.random.random(4), expected_numpy)
++
++
++def test_cloned_population_reproduces_candidate_vector_and_action_draw():
++    nodes = {
++        "a": make_node("a", 0.2),
++        "b": make_node("b", 0.3),
++        "c": make_node("c", 0.4),
++    }
++    experience = {
++        "enabled": True,
++        "parent_selection": {
++            "enabled": True,
++            "weights": {"score": 1.0, "delta": 0.4, "novelty": 0.25},
++        },
++    }
++    for node in nodes.values():
++        node.experience_card = {
++            "node_id": node.id,
++            "method_family_auto": "sklearn",
++            "fitness": node.metric.value,
++            "status": "success",
++            "status_code": 200,
++            "is_buggy": False,
++        }
++    source = SolutionsDatabase(
++        num_islands=1,
++        max_size=10,
++        lower_is_better=True,
++        logger=NullLogger(),
++        experience_config=experience,
++    )
++    source._islands[0].nodes = [nodes["b"], nodes["a"], nodes["c"]]
++    source.global_min_fitness = 0.2
++    source.global_max_fitness = 0.4
++
++    random.seed(2026)
++    numpy.random.seed(2027)
++    population_payload = source.state_dict()
++    rng_payload = capture_rng_state()
++    expected_nodes, expected_island, expected_operator = source.sample_in_context(
++        {"improve": 1, "crossover": 2}, 1.0, 0.5
++    )
++    expected_trace = source.last_parent_selection
++
++    clone = SolutionsDatabase(
++        num_islands=1,
++        max_size=10,
++        lower_is_better=True,
++        logger=NullLogger(),
++        experience_config=experience,
++    )
++    clone.load_state_dict(population_payload, nodes_by_id=nodes)
++    restore_rng_state(rng_payload)
++    actual_nodes, actual_island, actual_operator = clone.sample_in_context(
++        {"improve": 1, "crossover": 2}, 1.0, 0.5
++    )
++
++    assert [node.id for node in actual_nodes] == [node.id for node in expected_nodes]
++    assert (actual_island, actual_operator) == (expected_island, expected_operator)
++    assert clone.last_parent_selection == expected_trace
++
++
++def test_llm_trace_records_exact_prompt_and_request_seed():
++    llm = GenericLLM.__new__(GenericLLM)
++    llm.generation_kwargs = {"temperature": 0.6}
++    llm.call_tracker = 99
++    llm.set_generation_seed(20260816)
++    messages = [
++        {"role": "system", "content": "system prompt"},
++        {"role": "user", "content": "user prompt"},
++    ]
++
++    llm.call_tracker += 1
++    first_kwargs = llm._generation_kwargs_for_call()
++    llm.call_tracker += 1
++    second_kwargs = llm._generation_kwargs_for_call()
++    trace = llm._build_trace(
++        usage_stats={"prompt_tokens": 4},
++        messages=messages,
++        output="completion",
++        generation_kwargs=second_kwargs,
++    )
++
++    assert trace["prompt_messages"] == messages
++    assert trace["completion_text"] == "completion"
++    assert first_kwargs["seed"] == 20260816
++    assert trace["generation_kwargs"]["seed"] == 20260817
++
++    clone = GenericLLM.__new__(GenericLLM)
++    clone.generation_kwargs = {"temperature": 0.6, "seed": 20260816}
++    clone.call_tracker = 0
++    clone.load_generation_state_dict(llm.generation_state_dict())
++    clone.call_tracker += 1
++    assert clone._generation_kwargs_for_call()["seed"] == 20260818
++
++
++def test_evolutionary_checkpoint_includes_llm_call_schedule_state():
++    node = make_node("a", 0.2)
++    population = SolutionsDatabase(
++        num_islands=1,
++        max_size=10,
++        lower_is_better=True,
++        logger=NullLogger(),
++    )
++    population._islands[0].nodes = [node]
++    population.global_min_fitness = 0.2
++    population.global_max_fitness = 0.2
++
++    llm = GenericLLM.__new__(GenericLLM)
++    llm.generation_kwargs = {"seed": 123}
++    llm.call_tracker = 4
++    solver = Evolutionary.__new__(Evolutionary)
++    solver.journal = type("JournalStub", (), {"nodes": [node]})()
++    solver.state = EvolutionaryState()
++    solver._operator_llms = {"draft": llm}
++
++    payload = solver._population_checkpoint_payload(population)
++
++    assert payload["schema_version"] == 2
++    assert payload["llm_generation_state"] == {
++        "draft": {"call_tracker": 4, "base_seed": 123}
++    }

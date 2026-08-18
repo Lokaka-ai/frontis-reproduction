@@ -1,5 +1,11 @@
 # Third-party dependencies
 
-[FrontisAI/OpenRSI](https://github.com/FrontisAI/OpenRSI) is the upstream source for Frontis-MA1 / OpenMLE-Evo. Its source is not copied into this repository, and it is not currently included as a Git submodule.
+[FrontisAI/OpenRSI](https://github.com/FrontisAI/OpenRSI) is the upstream source for
+Frontis-MA1 / OpenMLE-Evo. The confirmation is pinned to OpenRSI commit
+`ece6cbdf115ed72c3b62643a836504d77365e3a0`; the baseline also used MLE-Bench commit
+`507f92e1138bb6e40dac5c6ee7a6758e6424bf97`.
 
-The exact upstream commit or release used for each experiment will be pinned in the corresponding configuration or experiment record once the reproduction environment is finalized.
+Upstream source and model weights are not redistributed. The
+`openrsi_patches/` directory contains the research instrumentation needed for exact
+live-population checkpoints, RNG and LLM sampling provenance, and final-submit
+controls. Apply only the documented cumulative patch for reproduction.
