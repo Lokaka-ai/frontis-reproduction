@@ -2,14 +2,19 @@
 
 - `run_selector_component_confirmation.sh`: guarded launcher for one preregistered
   confirmation seed.
+- `prepare_spooky_assets.py`: verifies the pinned MLE-Bench Spooky data and creates
+  the exact visible split, public test file, sample submission, task manifest, and
+  leaderboard used by the pilot.
 - `restore_validation_secure.py`: reconstructs the deterministic hidden holdout only
-  after verifying the persisted visible split and manifest.
+  after rechecking all prepared assets and their row order.
 - `extract_trajectory.py`: converts one OpenMLE-Evo trajectory to a reviewable table.
 - `counterfactual_parent_probe.py`: historical isolated forced-Improve probe. This
   is retained for transparency; its archive-wide support does not identify legal
   selector regret.
 
-Scripts fail rather than overwrite existing confirmation outputs.
+Preparation is safe to rerun: matching files are accepted, while conflicting files
+cause an error instead of being overwritten. Experiment launchers also fail rather
+than overwrite existing confirmation outputs.
 
 Runtime paths and local endpoints can be overridden with the `FRONTIS_*`
 environment variables documented in each script. The historical counterfactual

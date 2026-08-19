@@ -7,23 +7,15 @@ import argparse
 from pathlib import Path
 
 import pandas as pd
-from sklearn.model_selection import train_test_split
 
-
-TASK = "spooky-author-identification"
-CLASSES = ["EAP", "HPL", "MWS"]
-SEED = 42
-
-
-def assert_frame_equal(left: pd.DataFrame, right: pd.DataFrame, label: str) -> None:
-    try:
-        pd.testing.assert_frame_equal(
-            left.reset_index(drop=True),
-            right.reset_index(drop=True),
-            check_dtype=False,
-        )
-    except AssertionError as exc:
-        raise SystemExit(f"persistent {label} does not match reconstructed split: {exc}") from exc
+from prepare_spooky_assets import (
+    CLASSES,
+    SOURCE_MD5,
+    TASK,
+    file_digest,
+    validate_asset_frames,
+    validate_manifest,
+)
 
 
 def main() -> None:
@@ -46,26 +38,38 @@ def main() -> None:
     full_train_path = assets_root / f"submit/{TASK}/train.csv"
     visible_path = assets_root / f"validation/{TASK}/train.csv"
     hidden_public_path = assets_root / f"validation/{TASK}/test.csv"
+    sample_submission_path = assets_root / f"validation/{TASK}/sample_submission.csv"
     manifest_path = assets_root / f"manifest/{TASK}.parquet"
-    for path in (full_train_path, visible_path, hidden_public_path, manifest_path):
+    required_paths = (
+        full_train_path,
+        visible_path,
+        hidden_public_path,
+        sample_submission_path,
+        manifest_path,
+    )
+    for path in required_paths:
         if not path.is_file():
             raise SystemExit(f"required persistent asset is missing: {path}")
 
+    full_train_md5 = file_digest(full_train_path, "md5")
+    if full_train_md5 != SOURCE_MD5:
+        raise SystemExit(
+            f"persistent full train checksum mismatch: expected {SOURCE_MD5}, got {full_train_md5}"
+        )
     full_train = pd.read_csv(full_train_path)
-    visible, hidden = train_test_split(
-        full_train,
-        test_size=0.20,
-        random_state=SEED,
-        stratify=full_train["author"],
-    )
     persisted_visible = pd.read_csv(visible_path)
     persisted_hidden = pd.read_csv(hidden_public_path)
-    assert_frame_equal(visible, persisted_visible, "visible training data")
-    assert_frame_equal(hidden[["id", "text"]], persisted_hidden, "hidden validation inputs")
-
-    manifest = pd.read_parquet(manifest_path)
-    if len(manifest) != 1 or manifest.iloc[0]["metadata"]["task_name"] != TASK:
-        raise SystemExit("manifest identity check failed")
+    persisted_sample = pd.read_csv(sample_submission_path)
+    try:
+        hidden = validate_asset_frames(
+            full_train,
+            persisted_visible,
+            persisted_hidden,
+            persisted_sample,
+        )
+        validate_manifest(pd.read_parquet(manifest_path))
+    except (OSError, ValueError, KeyError) as exc:
+        raise SystemExit(f"persistent asset validation failed: {exc}") from exc
 
     answers = pd.DataFrame({"id": hidden["id"]})
     for label in CLASSES:
